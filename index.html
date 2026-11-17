@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" content="#000000">
+<title>Altyazı</title>
+<style>
+  :root { --fs: 28px; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; margin: 0; background: #000; color: #fff;
+    font-family: -apple-system, system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  #stage { flex: 1; display: flex; flex-direction: column; justify-content: flex-end;
+    padding: 16px; gap: 12px; overflow: hidden; }
+  .line { font-size: var(--fs); line-height: 1.3; font-weight: 600; text-align: center;
+    background: rgba(255,255,255,.08); border-radius: 12px; padding: 10px 14px; }
+  .line.old { opacity: .45; font-size: calc(var(--fs) * .75); }
+  .heard { font-size: 13px; opacity: .5; text-align: center; min-height: 18px; }
+  #bar { padding: 12px 16px 16px; background: #111; display: grid; gap: 10px; }
+  .row { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+  button { font: inherit; border: 0; border-radius: 12px; padding: 14px; font-weight: 700; }
+  #go { flex: 1; background: #2ecc71; color: #000; font-size: 18px; }
+  #go.on { background: #e74c3c; color: #fff; }
+  label { font-size: 14px; display: flex; gap: 6px; align-items: center; }
+  select, input[type=range] { font: inherit; }
+  #status { font-size: 12px; opacity: .6; text-align: center; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="line old" id="l2" hidden></div>
+  <div class="line old" id="l1" hidden></div>
+  <div class="line" id="l0">Başlat'a bas ve oyunu aç.</div>
+  <div class="heard" id="heard"></div>
+</div>
+<div id="bar">
+  <div class="row">
+    <label><input type="checkbox" id="sub" checked> Altyazı</label>
+    <label><input type="checkbox" id="voice" checked> Sesli okuma</label>
+    <label>Dil
+      <select id="lang">
+        <option value="en-US">İngilizce</option>
+        <option value="ja-JP">Japonca</option>
+        <option value="es-ES">İspanyolca</option>
+        <option value="de-DE">Almanca</option>
+        <option value="fr-FR">Fransızca</option>
+      </select>
+    </label>
+  </div>
+  <div class="row">
+    <label style="flex:1">Yazı <input id="size" type="range" min="16" max="48" value="28" style="flex:1"></label>
+    <label style="flex:1">Hız <input id="rate" type="range" min="0.8" max="1.6" step="0.1" value="1.1" style="flex:1"></label>
+  </div>
+  <button id="go">Başlat</button>
+  <div id="status">Kulaklık takılıyken kullan.</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, running = false, wakeLock = null;
+const history = [];
+const speakQueue = [];
+let speaking = false;
+
+if (!SR) { $('status').textContent = "Bu tarayıcı konuşma tanımayı desteklemiyor. iPhone'da Safari kullan."; $('go').disabled = true; }
+
+$('size').oninput = e => document.documentElement.style.setProperty('--fs', e.target.value + 'px');
+
+function render() {
+  const els = [$('l0'), $('l1'), $('l2')];
+  els.forEach((el, i) => {
+    const t = history[history.length - 1 - i];
+    if (i === 0) { el.textContent = t || ''; el.hidden = !$('sub').checked && true; }
+    else { el.textContent = t || ''; el.hidden = !t || !$('sub').checked; }
+  });
+  if (!$('sub').checked) $('l0').hidden = true;
+}
+$('sub').onchange = render;
+
+async function translate(text, from) {
+  const pair = from.split('-')[0] + '|tr';
+  const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text) + '&langpair=' + pair;
+  const r = await fetch(url);
+  const j = await r.json();
+  let out = j && j.responseData && j.responseData.translatedText;
+  if (!out) throw new Error('çeviri yok');
+  const ta = document.createElement('textarea'); ta.innerHTML = out; // HTML entity temizle
+  return ta.value;
+}
+
+function pickTrVoice() {
+  const vs = speechSynthesis.getVoices().filter(v => v.lang && v.lang.toLowerCase().startsWith('tr'));
+  return vs[0] || null;
+}
+
+function pumpSpeech() {
+  if (speaking || !speakQueue.length || !$('voice').checked) return;
+  // Kuyruk şişerse eskileri at, geride kalma
+  while (speakQueue.length > 3) speakQueue.shift();
+  const u = new SpeechSynthesisUtterance(speakQueue.shift());
+  u.lang = 'tr-TR';
+  const v = pickTrVoice(); if (v) u.voice = v;
+  u.rate = parseFloat($('rate').value);
+  speaking = true;
+  u.onend = u.onerror = () => { speaking = false; pumpSpeech(); };
+  speechSynthesis.speak(u);
+}
+
+async function handleFinal(text) {
+  text = text.trim();
+  if (!text) return;
+  $('heard').textContent = text;
+  try {
+    const tr = await translate(text, $('lang').value);
+    history.push(tr);
+    if (history.length > 20) history.shift();
+    render();
+    speakQueue.push(tr);
+    pumpSpeech();
+  } catch (e) {
+    $('status').textContent = 'Çeviri hatası (günlük ücretsiz limit dolmuş olabilir).';
+  }
+}
+
+function startRec() {
+  rec = new SR();
+  rec.lang = $('lang').value;
+  rec.continuous = true;
+  rec.interimResults = false;
+  rec.onresult = e => {
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) handleFinal(e.results[i][0].transcript);
+    }
+  };
+  rec.onerror = e => {
+    if (e.error === 'no-speech' || e.error === 'aborted') return; // normal, yeniden başlar
+    const msg = {
+      'not-allowed': 'Mikrofon/konuşma izni reddedildi (hata: not-allowed)',
+      'service-not-allowed': 'Dikte (dikte etme) kapalı olabilirе kapalı olabilir (hata: service-not-allowed)',
+      'network': 'İnternet/Apple servisi hatası (hata: network)',
+      'audio-capture': 'Mikrofon bulunamadı (hata: audio-capture)',
+      'language-not-supported': 'Bu dil desteklenmiyor (hata: language-not-supported)'
+    }[e.error] || ('Hata: ' + e.error);
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed' || e.error === 'audio-capture' || e.error === 'language-not-supported') {
+      stop(); $('status').textContent = msg;
+    } else {
+      $('status').textContent = msg;
+    }
+  };
+  // Safari sessizlikte kendini kapatır, çalışıyorsak yeniden başlat
+  rec.onend = () => { if (running) { try { startRec(); } catch (_) {} } };
+  rec.start();
+}
+
+async function start() {
+  running = true;
+  $('go').textContent = 'Durdur'; $('go').classList.add('on');
+  $('status').textContent = 'Dinleniyor…';
+  // iOS: sesli okumayı kullanıcı dokunuşuyla "aç"
+  const warm = new SpeechSynthesisUtterance(' '); warm.volume = 0; speechSynthesis.speak(warm);
+  try { wakeLock = await navigator.wakeLock.request('screen'); } catch (_) {}
+  if (navigator.standalone) {
+    $('status').textContent = "Ana ekrandan açtın: iOS bu modda konuşma tanımayı engelleyebilir. Hata olursa Safari'den aç.";
+  }
+  try { startRec(); } catch (err) { stop(); $('status').textContent = 'Başlatılamadı: ' + err.message; }
+}
+
+function stop() {
+  running = false;
+  try { rec && rec.stop(); } catch (_) {}
+  speechSynthesis.cancel(); speakQueue.length = 0; speaking = false;
+  try { wakeLock && wakeLock.release(); } catch (_) {}
+  $('go').textContent = 'Başlat'; $('go').classList.remove('on');
+  $('status').textContent = 'Durdu.';
+}
+
+$('go').onclick = () => running ? stop() : start();
+$('lang').onchange = () => { if (running) { try { rec.stop(); } catch (_) {} } };
+speechSynthesis.onvoiceschanged = () => {};
+</script>
+</body>
+</html>
